@@ -46,13 +46,14 @@ CREATE TABLE sentiment_runs (
     scrape_result_id INTEGER NOT NULL REFERENCES scrape_results(id),
     model            TEXT NOT NULL,
     prompt_version   TEXT NOT NULL,
+    chunk_index      INTEGER NOT NULL DEFAULT 0,  -- 0-based position of this chunk within the stored text
     label            TEXT,
     score            NUMERIC,
     rationale        TEXT,
     partisan_quote   TEXT,
     label_override   BOOLEAN NOT NULL DEFAULT false,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (scrape_result_id, model, prompt_version)
+    UNIQUE (scrape_result_id, model, prompt_version, chunk_index)
 );
 
 CREATE TABLE jobs (
@@ -67,49 +68,103 @@ CREATE TABLE jobs (
     error        TEXT
 );
 
--- Most recent sentiment result per URL
+-- Most recent sentiment result per URL, aggregated across chunks.
+-- A URL is 'partisan' if any chunk of its latest scrape is partisan.
+-- partisan_quote and rationale come from the highest-scoring partisan chunk (or
+-- the highest-scoring chunk overall when no chunk is partisan).
 CREATE MATERIALIZED VIEW mv_latest_sentiment AS
-SELECT DISTINCT ON (u.id)
+WITH latest_scrape AS (
+    -- Most recent scrape_result per URL
+    SELECT DISTINCT ON (url_id)
+        id AS scrape_result_id,
+        url_id,
+        scraped_at,
+        status_code,
+        title
+    FROM scrape_results
+    ORDER BY url_id, scraped_at DESC
+),
+chunk_agg AS (
+    -- Aggregate all chunks for each (scrape_result, model, prompt_version)
+    SELECT
+        sn.scrape_result_id,
+        sn.model,
+        sn.prompt_version,
+        bool_or(sn.label = 'partisan')                  AS is_partisan,
+        MAX(sn.score)                                    AS max_score,
+        COUNT(*)                                         AS chunk_count,
+        -- Pick the quote from the highest-scoring partisan chunk, else highest overall
+        (ARRAY_AGG(sn.partisan_quote ORDER BY
+            (sn.label = 'partisan') DESC, sn.score DESC NULLS LAST))[1] AS partisan_quote,
+        (ARRAY_AGG(sn.rationale ORDER BY
+            (sn.label = 'partisan') DESC, sn.score DESC NULLS LAST))[1] AS rationale,
+        bool_or(sn.label_override)                       AS label_override,
+        MAX(sn.created_at)                               AS last_classified_at
+    FROM sentiment_runs sn
+    GROUP BY sn.scrape_result_id, sn.model, sn.prompt_version
+),
+-- Take the most recent (model, prompt_version) classification per scrape
+latest_classification AS (
+    SELECT DISTINCT ON (ca.scrape_result_id)
+        ca.*
+    FROM chunk_agg ca
+    ORDER BY ca.scrape_result_id, ca.last_classified_at DESC
+)
+SELECT
     u.id          AS url_id,
     u.url,
     u.domain,
     u.organization,
     u.domain_type,
-    sr.id         AS scrape_result_id,
-    sr.scraped_at,
-    sr.status_code,
-    sr.title,
-    sn.id         AS sentiment_run_id,
-    sn.model,
-    sn.prompt_version,
-    sn.label,
-    sn.score,
-    sn.rationale,
-    sn.partisan_quote,
-    sn.label_override
+    ls.scrape_result_id,
+    ls.scraped_at,
+    ls.status_code,
+    ls.title,
+    lc.model,
+    lc.prompt_version,
+    lc.chunk_count,
+    CASE WHEN lc.is_partisan THEN 'partisan' ELSE 'neutral' END AS label,
+    lc.max_score  AS score,
+    lc.rationale,
+    lc.partisan_quote,
+    lc.label_override
 FROM urls u
-JOIN scrape_results sr ON sr.url_id = u.id
-JOIN sentiment_runs sn ON sn.scrape_result_id = sr.id
-ORDER BY u.id, sr.scraped_at DESC, sn.created_at DESC;
+JOIN latest_scrape ls ON ls.url_id = u.id
+JOIN latest_classification lc ON lc.scrape_result_id = ls.scrape_result_id;
 
 CREATE UNIQUE INDEX ON mv_latest_sentiment (url_id);
 
--- Partisan count per day across all URLs
+-- Partisan count per day across all URLs.
+-- One row per (scrape_date, model, prompt_version) — counts URLs partisan that day,
+-- not chunks. A URL counts as partisan if any chunk for that scrape is partisan.
 CREATE MATERIALIZED VIEW mv_partisan_over_time AS
+WITH url_day_label AS (
+    -- Collapse chunks: one partisan/neutral label per (url, scrape_date, model, prompt_version)
+    SELECT
+        DATE(sr.scraped_at)     AS scrape_date,
+        sn.model,
+        sn.prompt_version,
+        sr.url_id,
+        bool_or(sn.label = 'partisan') AS is_partisan
+    FROM scrape_results sr
+    JOIN sentiment_runs sn ON sn.scrape_result_id = sr.id
+    GROUP BY DATE(sr.scraped_at), sn.model, sn.prompt_version, sr.url_id
+)
 SELECT
-    DATE(sr.scraped_at)        AS scrape_date,
-    COUNT(*)                   AS total_classified,
-    COUNT(*) FILTER (WHERE sn.label = 'partisan') AS partisan_count,
+    scrape_date,
+    model,
+    prompt_version,
+    COUNT(*)                                         AS total_classified,
+    COUNT(*) FILTER (WHERE is_partisan)              AS partisan_count,
     ROUND(
-        100.0 * COUNT(*) FILTER (WHERE sn.label = 'partisan') / NULLIF(COUNT(*), 0),
+        100.0 * COUNT(*) FILTER (WHERE is_partisan) / NULLIF(COUNT(*), 0),
         2
-    )                          AS partisan_pct
-FROM scrape_results sr
-JOIN sentiment_runs sn ON sn.scrape_result_id = sr.id
-GROUP BY DATE(sr.scraped_at)
-ORDER BY scrape_date;
+    )                                                AS partisan_pct
+FROM url_day_label
+GROUP BY scrape_date, model, prompt_version
+ORDER BY scrape_date, model, prompt_version;
 
-CREATE UNIQUE INDEX ON mv_partisan_over_time (scrape_date);
+CREATE UNIQUE INDEX ON mv_partisan_over_time (scrape_date, model, prompt_version);
 
 -- Coordinator /work query
 CREATE INDEX idx_urls_active                ON urls(active) WHERE active = true;
@@ -125,10 +180,11 @@ CREATE INDEX idx_scrape_results_status      ON scrape_results(status_code) WHERE
 CREATE INDEX idx_scrape_results_text_hash   ON scrape_results(text_hash);
 
 -- Sentiment run lookups
-CREATE INDEX idx_sentiment_runs_scrape_id   ON sentiment_runs(scrape_result_id);
-CREATE INDEX idx_sentiment_runs_model       ON sentiment_runs(model);
-CREATE INDEX idx_sentiment_runs_label       ON sentiment_runs(label);
-CREATE INDEX idx_sentiment_runs_created_at  ON sentiment_runs(created_at);
+CREATE INDEX idx_sentiment_runs_scrape_id    ON sentiment_runs(scrape_result_id);
+CREATE INDEX idx_sentiment_runs_model        ON sentiment_runs(model);
+CREATE INDEX idx_sentiment_runs_label        ON sentiment_runs(label);
+CREATE INDEX idx_sentiment_runs_created_at   ON sentiment_runs(created_at);
+CREATE INDEX idx_sentiment_runs_chunk        ON sentiment_runs(scrape_result_id, chunk_index);
 
 -- CISA registry queries
 CREATE INDEX idx_domains_last_seen          ON domains(last_seen_at);

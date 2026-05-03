@@ -166,6 +166,7 @@ async def insert_sentiment_run(
     scrape_result_id: int,
     model: str,
     prompt_version: str,
+    chunk_index: int,
     label: str,
     score: float,
     rationale: str,
@@ -175,12 +176,12 @@ async def insert_sentiment_run(
     async with pool.acquire() as conn:
         result = await conn.execute("""
             INSERT INTO sentiment_runs
-                (scrape_result_id, model, prompt_version, label, score, rationale,
-                 partisan_quote, label_override)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (scrape_result_id, model, prompt_version) DO NOTHING
-        """, scrape_result_id, model, prompt_version, label, score, rationale,
-            partisan_quote, label_override)
+                (scrape_result_id, model, prompt_version, chunk_index, label, score,
+                 rationale, partisan_quote, label_override)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (scrape_result_id, model, prompt_version, chunk_index) DO NOTHING
+        """, scrape_result_id, model, prompt_version, chunk_index, label, score,
+            rationale, partisan_quote, label_override)
         return result.split()[-1] == '1'
 
 

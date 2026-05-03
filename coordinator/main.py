@@ -83,6 +83,7 @@ class SentimentResult(BaseModel):
     scrape_result_id: int
     model: str
     prompt_version: str
+    chunk_index: int = 0
     label: str
     score: float
     rationale: str
@@ -155,6 +156,7 @@ async def post_sentiment_result(
         payload.scrape_result_id,
         payload.model,
         payload.prompt_version,
+        payload.chunk_index,
         payload.label,
         payload.score,
         payload.rationale,
