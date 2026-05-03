@@ -41,6 +41,62 @@ services:
         max-size: "50m"
         max-file: "3"
 
+  sentiment-worker:
+    build: ./sentiment-worker
+    restart: unless-stopped
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_URL: http://coordinator:8000
+      API_KEY: ${SENTIMENT_KEY}
+      LLM_BACKEND: ${LLM_BACKEND:-openrouter}
+      LLM_MODEL: ${LLM_MODEL:-anthropic/claude-haiku-4-5}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      LLM_CHUNK_CHARS: ${LLM_CHUNK_CHARS:-4000}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-120}
+      SENTIMENT_BATCH_SIZE: ${SENTIMENT_BATCH_SIZE:-20}
+      PROMPT_VERSION: ${PROMPT_VERSION:-v1}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  scraper-worker-1:
+    build: ./scraper-worker
+    restart: unless-stopped
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_URL: http://coordinator:8000
+      API_KEY: ${SCRAPER_KEY_1}
+      WORKER_ID: nalu01-scraper-1
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  scraper-worker-2:
+    build: ./scraper-worker
+    restart: unless-stopped
+    depends_on:
+      coordinator:
+        condition: service_started
+    environment:
+      COORDINATOR_URL: http://coordinator:8000
+      API_KEY: ${SCRAPER_KEY_2}
+      WORKER_ID: nalu01-scraper-2
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
   tools:
     build: ./tools
     profiles: ["tools"]
