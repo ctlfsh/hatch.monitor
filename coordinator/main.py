@@ -74,7 +74,7 @@ class ScrapeResult(BaseModel):
     title: str | None = None
     text: str | None = None
     word_count: int = 0
-    text_hash: str
+    text_hash: str | None = None
     scraped_at: datetime
     error: str | None = None
 
@@ -116,17 +116,20 @@ async def post_result(
     payload: ScrapeResult,
     worker_name: str = Depends(require_api_key),
 ):
-    scrape_result_id = await db.complete_job(
-        app.state.pool,
-        payload.job_id,
-        payload.status_code,
-        payload.title,
-        payload.text,
-        payload.word_count,
-        payload.text_hash,
-        payload.error,
-        payload.scraped_at,
-    )
+    try:
+        scrape_result_id = await db.complete_job(
+            app.state.pool,
+            payload.job_id,
+            payload.status_code,
+            payload.title,
+            payload.text,
+            payload.word_count,
+            payload.text_hash,
+            payload.error,
+            payload.scraped_at,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     log.info("worker=%s POST /result job_id=%d scrape_result_id=%s", worker_name, payload.job_id, scrape_result_id)
     return {"ok": True, "scrape_result_id": scrape_result_id}
 
