@@ -36,9 +36,9 @@ CREATE TABLE scrape_results (
     title       TEXT,
     text        TEXT,
     word_count  INTEGER,
-    text_hash   TEXT,
+    text_hash   TEXT,     -- SHA-256[:16] of extracted text; NULL for error results (all errors stored, no dedup)
     error       TEXT,
-    UNIQUE (url_id, text_hash)
+    UNIQUE (url_id, text_hash) WHERE text_hash IS NOT NULL
 );
 
 CREATE TABLE sentiment_runs (
@@ -177,7 +177,7 @@ CREATE INDEX idx_domain_throttle_dispatched ON domain_throttle(last_dispatched_a
 CREATE INDEX idx_scrape_results_url_id      ON scrape_results(url_id);
 CREATE INDEX idx_scrape_results_scraped_at  ON scrape_results(scraped_at);
 CREATE INDEX idx_scrape_results_status      ON scrape_results(status_code) WHERE status_code = 200;
-CREATE INDEX idx_scrape_results_text_hash   ON scrape_results(text_hash);
+CREATE INDEX idx_scrape_results_text_hash   ON scrape_results(text_hash) WHERE text_hash IS NOT NULL;
 
 -- Sentiment run lookups
 CREATE INDEX idx_sentiment_runs_scrape_id    ON sentiment_runs(scrape_result_id);
