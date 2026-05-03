@@ -80,7 +80,7 @@ async def complete_job(
     title: str | None,
     text: str | None,
     word_count: int,
-    text_hash: str,
+    text_hash: str | None,
     error: str | None,
     scraped_at: datetime,
 ) -> int:
@@ -95,13 +95,23 @@ async def complete_job(
             if job['status'] != 'in_progress':
                 log.warning("job %d arrived late (status=%s) — inserting result anyway", job_id, job['status'])
 
-            result = await conn.fetchrow("""
-                INSERT INTO scrape_results
-                    (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (url_id, text_hash) DO NOTHING
-                RETURNING id
-            """, job['url_id'], scraped_at, status_code, title, text, word_count, text_hash, error)
+            if text_hash is None:
+                # Error result — always insert, no dedup. Every failed attempt is stored.
+                result = await conn.fetchrow("""
+                    INSERT INTO scrape_results
+                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
+                    VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)
+                    RETURNING id
+                """, job['url_id'], scraped_at, status_code, title, text, word_count, error)
+            else:
+                # Successful result — dedup on (url_id, text_hash) via partial unique index.
+                result = await conn.fetchrow("""
+                    INSERT INTO scrape_results
+                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (url_id, text_hash) WHERE text_hash IS NOT NULL DO NOTHING
+                    RETURNING id
+                """, job['url_id'], scraped_at, status_code, title, text, word_count, text_hash, error)
 
             scrape_result_id = result['id'] if result else await conn.fetchval(
                 "SELECT id FROM scrape_results WHERE url_id = $1 AND text_hash = $2",
