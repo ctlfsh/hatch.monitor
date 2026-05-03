@@ -1,0 +1,13 @@
+services:
+  scraper-worker:
+    image: ghcr.io/ctlfsh/sentimentor-scraper-worker:latest
+    restart: unless-stopped
+    environment:
+      COORDINATOR_URL: ${COORDINATOR_URL}
+      API_KEY: ${API_KEY}
+      WORKER_ID: ${WORKER_ID:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
