@@ -51,7 +51,7 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SENTIMENT_KEY}
       LLM_BACKEND: ${LLM_BACKEND:-openrouter}
-      LLM_MODEL: ${LLM_MODEL:-anthropic/claude-haiku-4-5}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-31b-it:free}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://openrouter.ai/api/v1}
       LLM_CHUNK_CHARS: ${LLM_CHUNK_CHARS:-4000}
@@ -75,6 +75,10 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SCRAPER_KEY_1}
       WORKER_ID: nalu01-scraper-1
+      MAX_TEXT_CHARS: ${MAX_TEXT_CHARS:-500000}
+      GOTO_TIMEOUT: ${GOTO_TIMEOUT:-30000}
+      WAIT_MS: ${WAIT_MS:-3000}
+      FETCH_TIMEOUT: ${FETCH_TIMEOUT:-120}
     logging:
       driver: json-file
       options:
@@ -91,6 +95,10 @@ services:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SCRAPER_KEY_2}
       WORKER_ID: nalu01-scraper-2
+      MAX_TEXT_CHARS: ${MAX_TEXT_CHARS:-500000}
+      GOTO_TIMEOUT: ${GOTO_TIMEOUT:-30000}
+      WAIT_MS: ${WAIT_MS:-3000}
+      FETCH_TIMEOUT: ${FETCH_TIMEOUT:-120}
     logging:
       driver: json-file
       options:
@@ -100,9 +108,6 @@ services:
   tools:
     build: ./tools
     profiles: ["tools"]
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://sentimentor:${POSTGRES_PASSWORD}@postgres:5432/sentimentor
     volumes:

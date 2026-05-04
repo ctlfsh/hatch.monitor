@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import Stealth
+from playwright_stealth import stealth_sync
 
 # ---------------------------------------------------------------------------
 # Module-level config — read with .get() so missing vars don't crash on import.
@@ -85,8 +85,7 @@ def fetch(url: str, wait_ms: int = 3000, goto_timeout: int = 30000, headless: bo
             },
         )
         page = context.new_page()
-        stealth_config = Stealth()
-        stealth_config.apply_stealth_sync(page)
+        stealth_sync(page)
 
         response = None
         try:
