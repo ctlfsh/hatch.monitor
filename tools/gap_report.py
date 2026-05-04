@@ -54,7 +54,7 @@ def fetch_cisa_csv():
 def filter_rows(rows, domain_type, all_types):
     if all_types:
         return rows
-    return [r for r in rows if r.get("Domain Type", "").strip() == domain_type]
+    return [r for r in rows if r.get("Domain type", "").strip() == domain_type]
 
 
 def main():
@@ -73,7 +73,7 @@ def main():
     cisa_rows = fetch_cisa_csv()
     filtered = filter_rows(cisa_rows, args.domain_type, args.all_types)
     scope = "all types" if args.all_types else f'"{args.domain_type}"'
-    cisa_domains = {r["Domain Name"].strip().lower(): r for r in filtered}
+    cisa_domains = {r["Domain name"].strip().lower(): r for r in filtered}
 
     conn = psycopg2.connect(db_url)
     try:
@@ -122,7 +122,7 @@ def main():
     if in_cisa_not_db:
         print(f"\nMissing from urls table (in CISA, not yet seeded) — {len(in_cisa_not_db)}:")
         for domain, row in sorted(in_cisa_not_db.items()):
-            print(f"  {domain:<45}  {row.get('Agency', '').strip()}")
+            print(f"  {domain:<45}  {row.get('Organization name', '').strip()}")
 
     if in_db_not_cisa:
         print(f"\nIn urls table, not in current CISA (likely deregistered) — {len(in_db_not_cisa)}:")

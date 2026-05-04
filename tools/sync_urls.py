@@ -54,15 +54,15 @@ def fetch_cisa_csv():
 def filter_rows(rows, domain_type, all_types):
     if all_types:
         return rows
-    return [r for r in rows if r.get("Domain Type", "").strip() == domain_type]
+    return [r for r in rows if r.get("Domain type", "").strip() == domain_type]
 
 
 def sync(rows, db_url, dry_run, run_start):
     if dry_run:
         print(f"[dry-run] Would upsert {len(rows)} domains and urls")
         for r in rows:
-            domain = r["Domain Name"].strip().lower()
-            print(f"  domain: {domain}  org: {r.get('Agency', '').strip()}  type: {r.get('Domain Type', '').strip()}")
+            domain = r["Domain name"].strip().lower()
+            print(f"  domain: {domain}  org: {r.get('Organization name', '').strip()}  type: {r.get('Domain type', '').strip()}")
         return
 
     conn = psycopg2.connect(db_url)
@@ -74,12 +74,12 @@ def sync(rows, db_url, dry_run, run_start):
                 urls_existing = 0
 
                 for r in rows:
-                    domain = r["Domain Name"].strip().lower()
-                    organization = r.get("Agency", "").strip() or None
-                    domain_type = r.get("Domain Type", "").strip() or None
+                    domain = r["Domain name"].strip().lower()
+                    organization = r.get("Organization name", "").strip() or None
+                    domain_type = r.get("Domain type", "").strip() or None
                     city = r.get("City", "").strip() or None
                     state = r.get("State", "").strip() or None
-                    security_contact = r.get("Security Contact Email", "").strip() or None
+                    security_contact = r.get("Security contact email", "").strip() or None
 
                     cur.execute("""
                         INSERT INTO domains (domain, organization, city, state, domain_type, security_contact, first_seen_at, last_seen_at)
@@ -119,7 +119,7 @@ def sync(rows, db_url, dry_run, run_start):
 def main():
     parser = argparse.ArgumentParser(description="Sync CISA federal domain registry into v2 Postgres")
     parser.add_argument("--domain-type", default="Federal - Executive",
-                        help='CISA domain type filter (default: "Federal - Executive")')
+                        help='CISA domain type filter (default: "Federal - Executive") — must match exactly, case-sensitive')
     parser.add_argument("--all", dest="all_types", action="store_true",
                         help="Include all CISA domain types (overrides --domain-type)")
     parser.add_argument("--dry-run", action="store_true",
