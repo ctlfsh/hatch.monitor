@@ -136,7 +136,14 @@ def main():
             log.info("scrape_result_id=%d url=%s chunks=%d", scrape_result_id, url, len(chunks))
 
             for chunk_index, chunk in enumerate(chunks):
-                result = llm.classify(chunk)
+                try:
+                    result = llm.classify(chunk)
+                except Exception as e:
+                    log.error(
+                        "LLM classify failed scrape_result_id=%d chunk=%d — skipping, will retry next poll: %s",
+                        scrape_result_id, chunk_index, e,
+                    )
+                    break
                 log.info(
                     "  chunk=%d label=%s score=%.2f",
                     chunk_index, result.label, result.score,

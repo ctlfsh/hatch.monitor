@@ -4,7 +4,10 @@ import re
 import time
 from dataclasses import dataclass
 
+import logging
 import requests
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,7 @@ class LLMClient:
                 )
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", backoff))
+                    log.warning("429 rate limited — retrying in %ds", retry_after)
                     time.sleep(retry_after)
                     backoff = min(backoff * 2, 60)
                     continue
@@ -153,27 +157,25 @@ class LLMClient:
                 raw = resp.json()["choices"][0]["message"]["content"]
                 return self._parse(raw)
             except requests.HTTPError as e:
+                log.warning("LLM HTTP error (attempt %d/%d): %s", attempt + 1, self.max_retries + 1, e)
                 last_error = e
                 if attempt < self.max_retries:
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 60)
             except Exception as e:
+                log.warning("LLM error (attempt %d/%d): %s", attempt + 1, self.max_retries + 1, e)
                 last_error = e
                 if attempt < self.max_retries:
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 60)
 
-        return ClassificationResult(
-            label="unknown",
-            score=0.0,
-            rationale=f"LLM error after {self.max_retries + 1} attempts: {last_error}",
-            partisan_quote=None,
-        )
+        raise RuntimeError(f"LLM failed after {self.max_retries + 1} attempts: {last_error}")
 
     def _parse(self, raw: str) -> ClassificationResult:
         try:
             data = extract_json_object(raw)
         except Exception:
+            log.warning("LLM parse failed — raw response: %s", raw[:400])
             return ClassificationResult(label="unknown", score=0.0, rationale=raw[:400], partisan_quote=None)
 
         lbl = str(data.get("label", "")).lower()
