@@ -37,9 +37,12 @@ CREATE TABLE scrape_results (
     text        TEXT,
     word_count  INTEGER,
     text_hash   TEXT,     -- SHA-256[:16] of extracted text; NULL for error results (all errors stored, no dedup)
-    error       TEXT,
-    UNIQUE (url_id, text_hash) WHERE text_hash IS NOT NULL
+    error       TEXT
 );
+
+CREATE UNIQUE INDEX idx_scrape_results_url_text_hash
+    ON scrape_results (url_id, text_hash)
+    WHERE text_hash IS NOT NULL;
 
 CREATE TABLE sentiment_runs (
     id               SERIAL PRIMARY KEY,
