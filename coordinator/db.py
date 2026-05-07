@@ -252,3 +252,22 @@ async def reset_failed_jobs(pool: asyncpg.Pool) -> int:
             WHERE status = 'failed'
         """)
         return int(result.split()[-1])
+
+
+async def reset_completed_jobs(pool: asyncpg.Pool, limit: int | None = None) -> int:
+    async with pool.acquire() as conn:
+        if limit is None:
+            result = await conn.execute("""
+                UPDATE jobs
+                SET status = 'pending', claimed_at = NULL, completed_at = NULL, claimed_by = NULL
+                WHERE status = 'completed'
+            """)
+        else:
+            result = await conn.execute("""
+                UPDATE jobs
+                SET status = 'pending', claimed_at = NULL, completed_at = NULL, claimed_by = NULL
+                WHERE id IN (
+                    SELECT id FROM jobs WHERE status = 'completed' ORDER BY RANDOM() LIMIT $1
+                )
+            """, limit)
+        return int(result.split()[-1])

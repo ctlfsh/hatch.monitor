@@ -189,3 +189,13 @@ async def admin_reset_failed(worker_name: str = Depends(require_api_key)):
     count = await db.reset_failed_jobs(app.state.pool)
     log.info("worker=%s POST /admin/reset-failed reset_count=%d", worker_name, count)
     return {"ok": True, "reset_count": count}
+
+
+@app.post("/admin/reset-completed")
+async def admin_reset_completed(
+    limit: int | None = None,
+    worker_name: str = Depends(require_api_key),
+):
+    count = await db.reset_completed_jobs(app.state.pool, limit=limit)
+    log.info("worker=%s POST /admin/reset-completed reset_count=%d limit=%s", worker_name, count, limit)
+    return {"ok": True, "reset_count": count}

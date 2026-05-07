@@ -114,5 +114,31 @@ services:
       - ./tools:/app/tools
     working_dir: /app
 
+  scheduler:
+    build: ./tools
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+    environment:
+      # DATABASE_URL is used by sync_urls.py (subprocess), not by scheduler.py itself
+      DATABASE_URL: postgresql://sentimentor:${POSTGRES_PASSWORD}@postgres:5432/sentimentor
+      COORDINATOR_URL: http://coordinator:8000
+      ADMIN_KEY: ${ADMIN_KEY}
+      SCHEDULE_HOUR: ${SCHEDULE_HOUR:-3}
+      SCHEDULE_INTERVAL_HOURS: ${SCHEDULE_INTERVAL_HOURS:-}
+      SCHEDULER_TEST_LIMIT: ${SCHEDULER_TEST_LIMIT:-}
+    volumes:
+      - ./tools:/app/tools
+    working_dir: /app
+    command: python tools/scheduler.py
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
 volumes:
   postgres_data:
