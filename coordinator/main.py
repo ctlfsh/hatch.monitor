@@ -7,7 +7,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+_worker_locations: dict = json.loads(os.environ.get("WORKER_LOCATIONS", "{}"))
+
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import db
@@ -57,6 +60,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 
 async def require_api_key(request: Request) -> str:
     key = request.headers.get("X-API-Key", "")
@@ -96,6 +106,29 @@ class SentimentResult(BaseModel):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/public/status")
+async def get_public_status():
+    status = await db.get_status(app.state.pool)
+    by_worker = status["by_worker"]
+
+    workers = []
+    for worker_id, completed in by_worker.items():
+        entry = {"id": worker_id, "completed": completed}
+        loc = _worker_locations.get(worker_id)
+        if loc:
+            entry["lat"] = loc["lat"]
+            entry["lon"] = loc["lon"]
+            entry["label"] = loc.get("label", worker_id)
+        workers.append(entry)
+
+    return {
+        "jobs": status["jobs"],
+        "scrape_results": status["scrape_results"],
+        "sentiment_runs": status["sentiment_runs"],
+        "workers": workers,
+    }
 
 
 @app.get("/work")

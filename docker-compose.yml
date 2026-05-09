@@ -31,6 +31,7 @@ services:
     environment:
       DATABASE_URL: postgresql://sentimentor:${POSTGRES_PASSWORD}@postgres:5432/sentimentor
       KEYS_FILE: /app/keys.json
+      WORKER_LOCATIONS: ${WORKER_LOCATIONS:-{}}
     volumes:
       - ./coordinator/keys.json:/app/keys.json:ro
     ports:
