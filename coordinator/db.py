@@ -227,6 +227,10 @@ async def get_status(pool: asyncpg.Pool) -> dict:
         """)
         by_worker = {r['claimed_by']: r['n'] for r in by_worker_rows}
 
+        last_scrape_at = await conn.fetchval(
+            "SELECT MAX(scraped_at) FROM scrape_results"
+        )
+
         return {
             'jobs': {
                 'pending':     jobs.get('pending', 0),
@@ -244,6 +248,7 @@ async def get_status(pool: asyncpg.Pool) -> dict:
                 'unclassified': unclassified,
             },
             'by_worker': by_worker,
+            'last_scrape_at': last_scrape_at.isoformat() if last_scrape_at else None,
         }
 
 

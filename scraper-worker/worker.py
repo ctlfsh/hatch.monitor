@@ -157,6 +157,17 @@ def run_fetch_subprocess(url, wait_ms, goto_timeout, headless, fetch_timeout) ->
 # Coordinator HTTP calls
 # ---------------------------------------------------------------------------
 
+def post_heartbeat(worker_id: str, url: str | None, action: str):
+    try:
+        SESSION.post(
+            f"{COORDINATOR_URL}/heartbeat",
+            json={"worker_id": worker_id, "url": url, "action": action},
+            timeout=5,
+        )
+    except Exception:
+        pass  # heartbeat is best-effort, never block the worker
+
+
 def get_work() -> dict | None:
     """Returns {job_id, url} or None on 204. Raises on any other status."""
     resp = SESSION.get(f"{COORDINATOR_URL}/work", timeout=10)
@@ -239,6 +250,7 @@ def main():
             continue
 
         if job is None:
+            post_heartbeat(worker_id, None, "waiting")
             log.info("No work available. Backoff %ds", idle_backoff._current)
             idle_backoff.wait()
             continue
@@ -249,6 +261,7 @@ def main():
         log.info("GET /work → job_id=%d url=%s", job_id, url)
 
         # --- fetch ---
+        post_heartbeat(worker_id, url, "scraping")
         fetch_start = time.time()
         status_code, html, fetch_error = run_fetch_subprocess(
             url,
@@ -298,6 +311,7 @@ def main():
         except Exception as e:
             log.error("POST /result failed job_id=%d url=%s error=%s — result lost", job_id, url, e)
             # No retry. The URL will be re-scraped when the job is reclaimed after 5 minutes.
+        post_heartbeat(worker_id, None, "waiting")
 
 
 if __name__ == "__main__":

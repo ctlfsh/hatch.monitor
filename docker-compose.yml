@@ -32,6 +32,7 @@ services:
       DATABASE_URL: postgresql://sentimentor:${POSTGRES_PASSWORD}@postgres:5432/sentimentor
       KEYS_FILE: /app/keys.json
       WORKER_LOCATIONS: ${WORKER_LOCATIONS:-{}}
+      SCHEDULE_HOUR: ${SCHEDULE_HOUR:-13}
     volumes:
       - ./coordinator/keys.json:/app/keys.json:ro
     ports:
@@ -51,6 +52,7 @@ services:
     environment:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SENTIMENT_KEY}
+      WORKER_ID: nalu01-sentiment-1
       LLM_BACKEND: ${LLM_BACKEND:-openrouter}
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-31b-it:free}
       LLM_API_KEY: ${LLM_API_KEY:-}

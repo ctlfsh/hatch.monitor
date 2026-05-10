@@ -4,10 +4,12 @@ import logging
 import os
 import signal
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 _worker_locations: dict = json.loads(os.environ.get("WORKER_LOCATIONS", "{}"))
+_worker_state: dict = {}
+_schedule_hour: int = int(os.environ.get("SCHEDULE_HOUR", 13))
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,7 +78,21 @@ async def require_api_key(request: Request) -> str:
     return name
 
 
+def next_run_utc() -> str:
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=_schedule_hour, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return target.isoformat()
+
+
 # ── request / response models ────────────────────────────────────────────────
+
+class HeartbeatPayload(BaseModel):
+    worker_id: str
+    url: str | None = None
+    action: str  # "scraping", "analyzing", "waiting"
+
 
 class ScrapeResult(BaseModel):
     job_id: int
@@ -113,22 +129,55 @@ async def get_public_status():
     status = await db.get_status(app.state.pool)
     by_worker = status["by_worker"]
 
+    all_worker_ids = set(by_worker.keys()) | set(_worker_state.keys())
     workers = []
-    for worker_id, completed in by_worker.items():
+    for worker_id in all_worker_ids:
+        completed = by_worker.get(worker_id, 0)
         entry = {"id": worker_id, "completed": completed}
+
         loc = _worker_locations.get(worker_id)
         if loc:
             entry["lat"] = loc["lat"]
             entry["lon"] = loc["lon"]
             entry["label"] = loc.get("label", worker_id)
+
+        state = _worker_state.get(worker_id)
+        if state:
+            age = (datetime.utcnow() - state["updated_at"]).total_seconds()
+            if age < 180:
+                entry["current_url"] = state["url"]
+                entry["action"] = state["action"]
+            else:
+                entry["current_url"] = None
+                entry["action"] = "waiting"
+        else:
+            entry["current_url"] = None
+            entry["action"] = "waiting"
+
         workers.append(entry)
 
     return {
         "jobs": status["jobs"],
         "scrape_results": status["scrape_results"],
         "sentiment_runs": status["sentiment_runs"],
+        "last_scrape_at": status["last_scrape_at"],
+        "next_run_at": next_run_utc(),
         "workers": workers,
     }
+
+
+@app.post("/heartbeat")
+async def post_heartbeat(
+    payload: HeartbeatPayload,
+    worker_name: str = Depends(require_api_key),
+):
+    _worker_state[payload.worker_id] = {
+        "url": payload.url,
+        "action": payload.action,
+        "updated_at": datetime.utcnow(),
+    }
+    log.info("worker=%s POST /heartbeat worker_id=%s action=%s", worker_name, payload.worker_id, payload.action)
+    return {"ok": True}
 
 
 @app.get("/work")

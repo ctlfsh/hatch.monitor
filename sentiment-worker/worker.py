@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import sys
 import time
 
@@ -67,6 +68,17 @@ def post_sentiment_result(payload: dict) -> dict:
     return resp.json()
 
 
+def post_heartbeat(worker_id: str, url: str | None, action: str):
+    try:
+        SESSION.post(
+            f"{COORDINATOR_URL}/heartbeat",
+            json={"worker_id": worker_id, "url": url, "action": action},
+            timeout=5,
+        )
+    except Exception:
+        pass  # heartbeat is best-effort, never block the worker
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -78,6 +90,8 @@ def main():
         sys.exit("ERROR: API_KEY env var is required")
 
     SESSION.headers.update({"X-API-Key": API_KEY})
+
+    worker_id = os.environ.get("WORKER_ID", socket.gethostname())
 
     model         = os.environ.get("LLM_MODEL", "anthropic/claude-haiku-4-5")
     prompt_version = os.environ.get("PROMPT_VERSION", "v1")
@@ -116,6 +130,7 @@ def main():
             continue
 
         if batch is None:
+            post_heartbeat(worker_id, None, "waiting")
             log.info("No work available. Backoff %ds", idle_backoff._current)
             idle_backoff.wait()
             continue
@@ -127,6 +142,8 @@ def main():
             scrape_result_id = item["scrape_result_id"]
             url              = item.get("url", "")
             text             = item.get("text") or ""
+
+            post_heartbeat(worker_id, url, "analyzing")
 
             if not text.strip():
                 log.warning("scrape_result_id=%d url=%s has empty text — skipping", scrape_result_id, url)
@@ -170,6 +187,8 @@ def main():
                         "POST /sentiment-result failed scrape_result_id=%d chunk=%d error=%s — skipping",
                         scrape_result_id, chunk_index, e,
                     )
+
+        post_heartbeat(worker_id, None, "waiting")
 
 
 if __name__ == "__main__":
