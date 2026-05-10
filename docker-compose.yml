@@ -35,7 +35,7 @@ services:
     volumes:
       - ./coordinator/keys.json:/app/keys.json:ro
     ports:
-      - "127.0.0.1:8000:8000"
+      - "100.99.91.99:8000:8000"
     logging:
       driver: json-file
       options:
@@ -69,6 +69,7 @@ services:
   scraper-worker-1:
     build: ./scraper-worker
     restart: unless-stopped
+    init: true
     depends_on:
       coordinator:
         condition: service_started
@@ -89,6 +90,7 @@ services:
   scraper-worker-2:
     build: ./scraper-worker
     restart: unless-stopped
+    init: true
     depends_on:
       coordinator:
         condition: service_started
