@@ -52,7 +52,7 @@ services:
     environment:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SENTIMENT_KEY}
-      WORKER_ID: nalu01-sentiment-1
+      WORKER_ID: sentiment-1
       LLM_BACKEND: ${LLM_BACKEND:-openrouter}
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-31b-it:free}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -78,7 +78,7 @@ services:
     environment:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SCRAPER_KEY_1}
-      WORKER_ID: nalu01-scraper-1
+      WORKER_ID: scraper-1
       MAX_TEXT_CHARS: ${MAX_TEXT_CHARS:-500000}
       GOTO_TIMEOUT: ${GOTO_TIMEOUT:-30000}
       WAIT_MS: ${WAIT_MS:-3000}
@@ -99,7 +99,7 @@ services:
     environment:
       COORDINATOR_URL: http://coordinator:8000
       API_KEY: ${SCRAPER_KEY_2}
-      WORKER_ID: nalu01-scraper-2
+      WORKER_ID: scraper-2
       MAX_TEXT_CHARS: ${MAX_TEXT_CHARS:-500000}
       GOTO_TIMEOUT: ${GOTO_TIMEOUT:-30000}
       WAIT_MS: ${WAIT_MS:-3000}
