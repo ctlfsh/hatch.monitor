@@ -105,11 +105,13 @@ async def complete_job(
                 """, job['url_id'], scraped_at, status_code, title, text, word_count, error)
             else:
                 # Successful result — dedup on (url_id, text_hash) via partial unique index.
+                # On conflict (same content), update scraped_at so the 24h interval resets.
                 result = await conn.fetchrow("""
                     INSERT INTO scrape_results
                         (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (url_id, text_hash) WHERE text_hash IS NOT NULL DO NOTHING
+                    ON CONFLICT (url_id, text_hash) WHERE text_hash IS NOT NULL
+                    DO UPDATE SET scraped_at = EXCLUDED.scraped_at
                     RETURNING id
                 """, job['url_id'], scraped_at, status_code, title, text, word_count, text_hash, error)
 
