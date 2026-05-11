@@ -121,6 +121,17 @@ services:
       - ./tools:/app/tools
     working_dir: /app
 
+  pgweb:
+    image: sosedoff/pgweb
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://sentimentor:${POSTGRES_PASSWORD}@postgres:5432/sentimentor?sslmode=disable
+    ports:
+      - "127.0.0.1:8081:8081"
+
   scheduler:
     build: ./tools
     restart: unless-stopped
