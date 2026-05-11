@@ -10,6 +10,8 @@ from pathlib import Path
 _worker_locations: dict = json.loads(os.environ.get("WORKER_LOCATIONS", "{}"))
 _worker_state: dict = {}
 _schedule_hour: int = int(os.environ.get("SCHEDULE_HOUR", 13))
+MAX_SCRAPE_ATTEMPTS: int = int(os.environ.get("MAX_SCRAPE_ATTEMPTS", 3))
+_cycle_url_limit: int | None = int(os.environ.get("CYCLE_URL_LIMIT")) if os.environ.get("CYCLE_URL_LIMIT") else None
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,7 +47,7 @@ async def reclaim_loop():
         try:
             n = await db.reclaim_timed_out_jobs(app.state.pool)
             if n:
-                log.warning("Reclaimed %d timed-out job(s)", n)
+                log.warning("Deleted %d timed-out job(s)", n)
         except Exception:
             log.exception("reclaim_loop error")
 
@@ -158,6 +160,9 @@ async def get_public_status():
 
     return {
         "jobs": status["jobs"],
+        "urls_awaiting": status["urls_awaiting"],
+        "scraped_today": status["scraped_today"],
+        "scraped_all_time": status["scraped_all_time"],
         "scrape_results": status["scrape_results"],
         "sentiment_runs": status["sentiment_runs"],
         "last_scrape_at": status["last_scrape_at"],
@@ -185,7 +190,7 @@ async def get_work(
     request: Request,
     worker_name: str = Depends(require_api_key),
 ):
-    job = await db.claim_job(app.state.pool, worker_name)
+    job = await db.claim_job(app.state.pool, worker_name, MAX_SCRAPE_ATTEMPTS)
     if job is None:
         log.info("worker=%s GET /work → 204", worker_name)
         return Response(status_code=204)
@@ -209,6 +214,7 @@ async def post_result(
             payload.text_hash,
             payload.error,
             payload.scraped_at,
+            worker_name=worker_name,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -266,18 +272,12 @@ async def admin_reload_keys(worker_name: str = Depends(require_api_key)):
     return {"ok": True, "key_count": len(api_keys)}
 
 
-@app.post("/admin/reset-failed")
-async def admin_reset_failed(worker_name: str = Depends(require_api_key)):
-    count = await db.reset_failed_jobs(app.state.pool)
-    log.info("worker=%s POST /admin/reset-failed reset_count=%d", worker_name, count)
-    return {"ok": True, "reset_count": count}
-
-
-@app.post("/admin/reset-completed")
-async def admin_reset_completed(
+@app.post("/admin/start-cycle")
+async def admin_start_cycle(
     limit: int | None = None,
     worker_name: str = Depends(require_api_key),
 ):
-    count = await db.reset_completed_jobs(app.state.pool, limit=limit)
-    log.info("worker=%s POST /admin/reset-completed reset_count=%d limit=%s", worker_name, count, limit)
-    return {"ok": True, "reset_count": count}
+    effective_limit = limit if limit is not None else _cycle_url_limit
+    count = await db.start_cycle(app.state.pool, limit=effective_limit)
+    log.info("worker=%s POST /admin/start-cycle urls_activated=%d limit=%s", worker_name, count, effective_limit)
+    return {"ok": True, "urls_activated": count}

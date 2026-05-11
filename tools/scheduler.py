@@ -8,7 +8,7 @@ import requests
 
 SCHEDULE_HOUR = int(os.environ.get("SCHEDULE_HOUR", "3"))
 SCHEDULE_INTERVAL_HOURS = os.environ.get("SCHEDULE_INTERVAL_HOURS")
-SCHEDULER_TEST_LIMIT = os.environ.get("SCHEDULER_TEST_LIMIT")
+CYCLE_URL_LIMIT = os.environ.get("CYCLE_URL_LIMIT")
 COORDINATOR_URL = os.environ["COORDINATOR_URL"]
 ADMIN_KEY = os.environ["ADMIN_KEY"]
 
@@ -42,31 +42,21 @@ def run_sync_urls():
     return True
 
 
-def reset_jobs():
-    log("Resetting completed jobs to pending ...")
-    url = f"{COORDINATOR_URL}/admin/reset-completed"
-    if SCHEDULER_TEST_LIMIT:
-        url += f"?limit={SCHEDULER_TEST_LIMIT}"
+def start_cycle():
+    log("Starting new scrape cycle ...")
+    url = f"{COORDINATOR_URL}/admin/start-cycle"
+    if CYCLE_URL_LIMIT:
+        url += f"?limit={CYCLE_URL_LIMIT}"
     resp = requests.post(url, headers={"X-API-Key": ADMIN_KEY}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    log(f"Reset {data['reset_count']} completed job(s) to pending.")
-
-    log("Resetting failed jobs to pending ...")
-    resp = requests.post(
-        f"{COORDINATOR_URL}/admin/reset-failed",
-        headers={"X-API-Key": ADMIN_KEY},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    log(f"Reset {data['reset_count']} failed job(s) to pending.")
+    log(f"Cycle started: {data['urls_activated']} URL(s) activated.")
 
 
 def main():
     if SCHEDULE_INTERVAL_HOURS:
         log(f"Scheduler started in TEST MODE. Interval: every {SCHEDULE_INTERVAL_HOURS}h. "
-            f"Job limit: {SCHEDULER_TEST_LIMIT or 'all'}.")
+            f"URL limit: {CYCLE_URL_LIMIT or 'all'}.")
     else:
         log(f"Scheduler started. Will run daily at {SCHEDULE_HOUR:02d}:00 UTC.")
 
@@ -82,9 +72,9 @@ def main():
             log(f"sync_urls.py raised an exception: {e}")
 
         try:
-            reset_jobs()
+            start_cycle()
         except Exception as e:
-            log(f"reset_jobs raised an exception: {e}")
+            log(f"start_cycle raised an exception: {e}")
 
         log("=== Daily run complete ===")
 

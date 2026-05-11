@@ -21,6 +21,8 @@ CREATE TABLE urls (
     url                   TEXT UNIQUE NOT NULL,
     scrape_interval_hours INTEGER NOT NULL DEFAULT 24,
     active                BOOLEAN NOT NULL DEFAULT true,
+    needs_scraping        BOOLEAN NOT NULL DEFAULT true,
+    scrape_attempts       INTEGER NOT NULL DEFAULT 0,
     organization          TEXT,
     domain_type           TEXT,
     notes                 TEXT,
@@ -37,7 +39,8 @@ CREATE TABLE scrape_results (
     text        TEXT,
     word_count  INTEGER,
     text_hash   TEXT,     -- SHA-256[:16] of extracted text; NULL for error results (all errors stored, no dedup)
-    error       TEXT
+    error       TEXT,
+    scraped_by  TEXT
 );
 
 CREATE UNIQUE INDEX idx_scrape_results_url_text_hash
@@ -171,7 +174,7 @@ CREATE UNIQUE INDEX ON mv_partisan_over_time (scrape_date, model, prompt_version
 
 -- Coordinator /work query
 CREATE INDEX idx_urls_active                ON urls(active) WHERE active = true;
-CREATE INDEX idx_jobs_status                ON jobs(status) WHERE status IN ('pending', 'in_progress');
+CREATE INDEX idx_jobs_status                ON jobs(status) WHERE status = 'in_progress';
 
 -- Domain throttling
 CREATE INDEX idx_domain_throttle_dispatched ON domain_throttle(last_dispatched_at);

@@ -33,6 +33,8 @@ services:
       KEYS_FILE: /app/keys.json
       WORKER_LOCATIONS: ${WORKER_LOCATIONS:-{}}
       SCHEDULE_HOUR: ${SCHEDULE_HOUR:-13}
+      MAX_SCRAPE_ATTEMPTS: ${MAX_SCRAPE_ATTEMPTS:-3}
+      CYCLE_URL_LIMIT: ${CYCLE_URL_LIMIT:-}
     volumes:
       - ./coordinator/keys.json:/app/keys.json:ro
     ports:
@@ -134,7 +136,7 @@ services:
       ADMIN_KEY: ${ADMIN_KEY}
       SCHEDULE_HOUR: ${SCHEDULE_HOUR:-3}
       SCHEDULE_INTERVAL_HOURS: ${SCHEDULE_INTERVAL_HOURS:-}
-      SCHEDULER_TEST_LIMIT: ${SCHEDULER_TEST_LIMIT:-}
+      CYCLE_URL_LIMIT: ${CYCLE_URL_LIMIT:-}
     volumes:
       - ./tools:/app/tools
     working_dir: /app

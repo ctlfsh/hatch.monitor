@@ -27,33 +27,49 @@ async def close_pool():
         _pool = None
 
 
-async def claim_job(pool: asyncpg.Pool, worker_name: str) -> dict | None:
+async def start_cycle(pool: asyncpg.Pool, limit: int | None = None) -> int:
+    async with pool.acquire() as conn:
+        if limit is None:
+            result = await conn.execute("""
+                UPDATE urls
+                SET needs_scraping = true, scrape_attempts = 0
+                WHERE active = true
+            """)
+        else:
+            result = await conn.execute("""
+                UPDATE urls
+                SET needs_scraping = true, scrape_attempts = 0
+                WHERE active = true
+                  AND id IN (
+                      SELECT id FROM urls WHERE active = true ORDER BY RANDOM() LIMIT $1
+                  )
+            """, limit)
+        return int(result.split()[-1])
+
+
+async def claim_job(pool: asyncpg.Pool, worker_name: str, max_scrape_attempts: int) -> dict | None:
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow("""
                 SELECT u.id AS url_id, u.url, u.domain
                 FROM urls u
                 WHERE u.active = true
+                  AND u.needs_scraping = true
+                  AND u.scrape_attempts < $1
                   AND NOT EXISTS (
                       SELECT 1 FROM jobs j
                       WHERE j.url_id = u.id
-                        AND j.status IN ('pending', 'in_progress')
+                        AND j.status = 'in_progress'
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM domain_throttle dt
                       WHERE dt.domain = u.domain
                         AND dt.last_dispatched_at > now() - interval '60 seconds'
                   )
-                  AND (
-                      NOT EXISTS (SELECT 1 FROM scrape_results sr WHERE sr.url_id = u.id)
-                      OR (
-                          SELECT MAX(sr.scraped_at) FROM scrape_results sr WHERE sr.url_id = u.id
-                      ) < now() - (u.scrape_interval_hours || ' hours')::interval
-                  )
                 ORDER BY RANDOM()
                 LIMIT 1
                 FOR UPDATE OF u SKIP LOCKED
-            """)
+            """, max_scrape_attempts)
 
             if row is None:
                 return None
@@ -83,9 +99,11 @@ async def complete_job(
     text_hash: str | None,
     error: str | None,
     scraped_at: datetime,
+    worker_name: str | None = None,
 ) -> int:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Fetch job first — if missing (already reclaimed), bail without touching urls or scrape_results.
             job = await conn.fetchrow(
                 "SELECT url_id, status FROM jobs WHERE id = $1", job_id
             )
@@ -95,35 +113,45 @@ async def complete_job(
             if job['status'] != 'in_progress':
                 log.warning("job %d arrived late (status=%s) — inserting result anyway", job_id, job['status'])
 
+            url_id = job['url_id']
+
             if text_hash is None:
-                # Error result — always insert, no dedup. Every failed attempt is stored.
+                # Error result — always insert, no dedup. Increment scrape_attempts.
                 result = await conn.fetchrow("""
                     INSERT INTO scrape_results
-                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
-                    VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)
+                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error, scraped_by)
+                    VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
                     RETURNING id
-                """, job['url_id'], scraped_at, status_code, title, text, word_count, error)
+                """, url_id, scraped_at, status_code, title, text, word_count, error, worker_name)
+
+                # Leave needs_scraping = true so the URL can be retried (up to MAX_SCRAPE_ATTEMPTS).
+                await conn.execute("""
+                    UPDATE urls SET scrape_attempts = scrape_attempts + 1 WHERE id = $1
+                """, url_id)
             else:
-                # Successful result — dedup on (url_id, text_hash) via partial unique index.
-                # On conflict (same content), update scraped_at so the 24h interval resets.
+                # Successful result — dedup on (url_id, text_hash).
+                # On conflict (same content), update scraped_at so the record stays current.
                 result = await conn.fetchrow("""
                     INSERT INTO scrape_results
-                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error, scraped_by)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (url_id, text_hash) WHERE text_hash IS NOT NULL
-                    DO UPDATE SET scraped_at = EXCLUDED.scraped_at
+                    DO UPDATE SET scraped_at = EXCLUDED.scraped_at, scraped_by = EXCLUDED.scraped_by
                     RETURNING id
-                """, job['url_id'], scraped_at, status_code, title, text, word_count, text_hash, error)
+                """, url_id, scraped_at, status_code, title, text, word_count, text_hash, error, worker_name)
+
+                # Mark done — whether dedup fired or not, the URL was successfully scraped.
+                await conn.execute("""
+                    UPDATE urls SET needs_scraping = false WHERE id = $1
+                """, url_id)
 
             scrape_result_id = result['id'] if result else await conn.fetchval(
                 "SELECT id FROM scrape_results WHERE url_id = $1 AND text_hash = $2",
-                job['url_id'], text_hash
+                url_id, text_hash
             )
 
-            await conn.execute(
-                "UPDATE jobs SET status = 'completed', completed_at = now() WHERE id = $1",
-                job_id
-            )
+            # Delete the job row — jobs table is now a pure in-flight tracker.
+            await conn.execute("DELETE FROM jobs WHERE id = $1", job_id)
 
             return scrape_result_id
 
@@ -138,11 +166,16 @@ async def fail_job(pool: asyncpg.Pool, job_id: int, error: str):
 
 async def reclaim_timed_out_jobs(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as conn:
+        # Atomically delete timed-out in_progress jobs and increment scrape_attempts on their URLs.
         result = await conn.execute("""
-            UPDATE jobs
-            SET status = 'pending', claimed_by = NULL, claimed_at = NULL
-            WHERE status = 'in_progress'
-              AND claimed_at < now() - interval '5 minutes'
+            WITH timed_out AS (
+                DELETE FROM jobs
+                WHERE status = 'in_progress'
+                  AND claimed_at < now() - interval '5 minutes'
+                RETURNING url_id
+            )
+            UPDATE urls SET scrape_attempts = scrape_attempts + 1
+            WHERE id IN (SELECT url_id FROM timed_out)
         """)
         count = int(result.split()[-1])
         return count
@@ -199,16 +232,28 @@ async def insert_sentiment_run(
 
 async def get_status(pool: asyncpg.Pool) -> dict:
     async with pool.acquire() as conn:
-        job_counts = await conn.fetch("""
-            SELECT status, COUNT(*) AS n FROM jobs GROUP BY status
-        """)
-        jobs = {r['status']: r['n'] for r in job_counts}
+        in_progress = await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'in_progress'"
+        )
 
         url_counts = await conn.fetchrow("""
             SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM urls
         """)
 
+        urls_awaiting = await conn.fetchval(
+            "SELECT COUNT(*) FROM urls WHERE needs_scraping = true AND active = true"
+        )
+
         scrape_total = await conn.fetchval("SELECT COUNT(*) FROM scrape_results")
+
+        scraped_today = await conn.fetchval("""
+            SELECT COUNT(*) FROM scrape_results
+            WHERE scraped_by IS NOT NULL AND DATE(scraped_at) = CURRENT_DATE
+        """)
+
+        scraped_all_time = await conn.fetchval("""
+            SELECT COUNT(*) FROM scrape_results WHERE scraped_by IS NOT NULL
+        """)
 
         sentiment_total = await conn.fetchval("SELECT COUNT(*) FROM sentiment_runs")
 
@@ -220,12 +265,12 @@ async def get_status(pool: asyncpg.Pool) -> dict:
         """)
 
         by_worker_rows = await conn.fetch("""
-            SELECT claimed_by, COUNT(*) AS n
-            FROM jobs
-            WHERE status = 'completed' AND claimed_by IS NOT NULL
-            GROUP BY claimed_by
+            SELECT scraped_by, COUNT(*) AS n
+            FROM scrape_results
+            WHERE scraped_by IS NOT NULL
+            GROUP BY scraped_by
         """)
-        by_worker = {r['claimed_by']: r['n'] for r in by_worker_rows}
+        by_worker = {r['scraped_by']: r['n'] for r in by_worker_rows}
 
         last_scrape_at = await conn.fetchval(
             "SELECT MAX(scraped_at) FROM scrape_results"
@@ -233,15 +278,15 @@ async def get_status(pool: asyncpg.Pool) -> dict:
 
         return {
             'jobs': {
-                'pending':     jobs.get('pending', 0),
-                'in_progress': jobs.get('in_progress', 0),
-                'completed':   jobs.get('completed', 0),
-                'failed':      jobs.get('failed', 0),
+                'in_progress': in_progress,
             },
             'urls': {
                 'total':  url_counts['total'],
                 'active': url_counts['active'],
             },
+            'urls_awaiting': urls_awaiting,
+            'scraped_today': scraped_today,
+            'scraped_all_time': scraped_all_time,
             'scrape_results': {'total': scrape_total},
             'sentiment_runs': {
                 'total':        sentiment_total,
@@ -250,31 +295,3 @@ async def get_status(pool: asyncpg.Pool) -> dict:
             'by_worker': by_worker,
             'last_scrape_at': last_scrape_at.isoformat() if last_scrape_at else None,
         }
-
-
-async def reset_failed_jobs(pool: asyncpg.Pool) -> int:
-    async with pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE jobs SET status = 'pending', error = NULL
-            WHERE status = 'failed'
-        """)
-        return int(result.split()[-1])
-
-
-async def reset_completed_jobs(pool: asyncpg.Pool, limit: int | None = None) -> int:
-    async with pool.acquire() as conn:
-        if limit is None:
-            result = await conn.execute("""
-                UPDATE jobs
-                SET status = 'pending', claimed_at = NULL, completed_at = NULL, claimed_by = NULL
-                WHERE status = 'completed'
-            """)
-        else:
-            result = await conn.execute("""
-                UPDATE jobs
-                SET status = 'pending', claimed_at = NULL, completed_at = NULL, claimed_by = NULL
-                WHERE id IN (
-                    SELECT id FROM jobs WHERE status = 'completed' ORDER BY RANDOM() LIMIT $1
-                )
-            """, limit)
-        return int(result.split()[-1])
