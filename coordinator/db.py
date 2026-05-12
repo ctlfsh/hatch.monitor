@@ -27,24 +27,50 @@ async def close_pool():
         _pool = None
 
 
-async def start_cycle(pool: asyncpg.Pool, limit: int | None = None) -> int:
+async def start_cycle(
+    pool: asyncpg.Pool,
+    limit: int | None = None,
+    started_by: str = "manual",
+) -> tuple[int, datetime]:
     async with pool.acquire() as conn:
-        if limit is None:
-            result = await conn.execute("""
-                UPDATE urls
-                SET needs_scraping = true, scrape_attempts = 0
-                WHERE active = true
-            """)
-        else:
-            result = await conn.execute("""
-                UPDATE urls
-                SET needs_scraping = true, scrape_attempts = 0
-                WHERE active = true
-                  AND id IN (
-                      SELECT id FROM urls WHERE active = true ORDER BY RANDOM() LIMIT $1
-                  )
-            """, limit)
-        return int(result.split()[-1])
+        async with conn.transaction():
+            if limit is None:
+                result = await conn.execute("""
+                    UPDATE urls
+                    SET needs_scraping = true, scrape_attempts = 0
+                    WHERE active = true
+                """)
+            else:
+                result = await conn.execute("""
+                    UPDATE urls
+                    SET needs_scraping = true, scrape_attempts = 0
+                    WHERE active = true
+                      AND id IN (
+                          SELECT id FROM urls WHERE active = true ORDER BY RANDOM() LIMIT $1
+                      )
+                """, limit)
+
+            count = int(result.split()[-1])
+
+            row = await conn.fetchrow("""
+                INSERT INTO cycle_state (id, cycle_started_at, cycle_started_by)
+                VALUES (1, now(), $1)
+                ON CONFLICT (id) DO UPDATE
+                    SET cycle_started_at = now(), cycle_started_by = EXCLUDED.cycle_started_by
+                RETURNING cycle_started_at
+            """, started_by)
+
+            return count, row['cycle_started_at']
+
+
+async def get_cycle_state(pool: asyncpg.Pool) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT cycle_started_at, cycle_started_by FROM cycle_state WHERE id = 1"
+        )
+        if row is None:
+            return None
+        return dict(row)
 
 
 async def claim_job(pool: asyncpg.Pool, worker_name: str, max_scrape_attempts: int) -> dict | None:
@@ -100,6 +126,7 @@ async def complete_job(
     error: str | None,
     scraped_at: datetime,
     worker_name: str | None = None,
+    cycle_started_at: datetime | None = None,
 ) -> int:
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -119,10 +146,12 @@ async def complete_job(
                 # Error result — always insert, no dedup. Increment scrape_attempts.
                 result = await conn.fetchrow("""
                     INSERT INTO scrape_results
-                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error, scraped_by)
-                    VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8)
+                        (url_id, scraped_at, status_code, title, text, word_count,
+                         text_hash, error, scraped_by, cycle_started_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9)
                     RETURNING id
-                """, url_id, scraped_at, status_code, title, text, word_count, error, worker_name)
+                """, url_id, scraped_at, status_code, title, text, word_count,
+                    error, worker_name, cycle_started_at)
 
                 # Leave needs_scraping = true so the URL can be retried (up to MAX_SCRAPE_ATTEMPTS).
                 await conn.execute("""
@@ -130,15 +159,20 @@ async def complete_job(
                 """, url_id)
             else:
                 # Successful result — dedup on (url_id, text_hash).
-                # On conflict (same content), update scraped_at so the record stays current.
+                # On conflict (same content), update scraped_at and cycle_started_at so the record stays current.
                 result = await conn.fetchrow("""
                     INSERT INTO scrape_results
-                        (url_id, scraped_at, status_code, title, text, word_count, text_hash, error, scraped_by)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        (url_id, scraped_at, status_code, title, text, word_count,
+                         text_hash, error, scraped_by, cycle_started_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (url_id, text_hash) WHERE text_hash IS NOT NULL
-                    DO UPDATE SET scraped_at = EXCLUDED.scraped_at, scraped_by = EXCLUDED.scraped_by
+                    DO UPDATE SET
+                        scraped_at       = EXCLUDED.scraped_at,
+                        scraped_by       = EXCLUDED.scraped_by,
+                        cycle_started_at = EXCLUDED.cycle_started_at
                     RETURNING id
-                """, url_id, scraped_at, status_code, title, text, word_count, text_hash, error, worker_name)
+                """, url_id, scraped_at, status_code, title, text, word_count,
+                    text_hash, error, worker_name, cycle_started_at)
 
                 # Mark done — whether dedup fired or not, the URL was successfully scraped.
                 await conn.execute("""
@@ -230,7 +264,11 @@ async def insert_sentiment_run(
         return result.split()[-1] == '1'
 
 
-async def get_status(pool: asyncpg.Pool) -> dict:
+async def get_status(
+    pool: asyncpg.Pool,
+    cycle_started_at: datetime | None = None,
+    max_scrape_attempts: int = 3,
+) -> dict:
     async with pool.acquire() as conn:
         in_progress = await conn.fetchval(
             "SELECT COUNT(*) FROM jobs WHERE status = 'in_progress'"
@@ -240,20 +278,60 @@ async def get_status(pool: asyncpg.Pool) -> dict:
             SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE active) AS active FROM urls
         """)
 
-        urls_awaiting = await conn.fetchval(
-            "SELECT COUNT(*) FROM urls WHERE needs_scraping = true AND active = true"
-        )
+        urls_awaiting = await conn.fetchval("""
+            SELECT COUNT(*) FROM urls
+            WHERE needs_scraping = true AND active = true AND scrape_attempts < $1
+        """, max_scrape_attempts)
 
         scrape_total = await conn.fetchval("SELECT COUNT(*) FROM scrape_results")
 
-        scraped_today = await conn.fetchval("""
-            SELECT COUNT(*) FROM scrape_results
-            WHERE scraped_by IS NOT NULL AND DATE(scraped_at) = CURRENT_DATE
-        """)
+        # This run: resolved URL-jobs for the current cycle (one row per url_id, success wins over error)
+        if cycle_started_at is not None:
+            this_run_row = await conn.fetchrow("""
+                WITH resolved AS (
+                    SELECT
+                        url_id,
+                        bool_or(text_hash IS NOT NULL) AS has_success
+                    FROM scrape_results
+                    WHERE cycle_started_at = $1
+                    GROUP BY url_id
+                )
+                SELECT
+                    COUNT(*)                                    AS total,
+                    COUNT(*) FILTER (WHERE has_success)         AS good,
+                    COUNT(*) FILTER (WHERE NOT has_success)     AS failed
+                FROM resolved
+            """, cycle_started_at)
+            this_run = {
+                'total': this_run_row['total'],
+                'good':  this_run_row['good'],
+                'failed': this_run_row['failed'],
+            }
+        else:
+            this_run = {'total': 0, 'good': 0, 'failed': 0}
 
-        scraped_all_time = await conn.fetchval("""
-            SELECT COUNT(*) FROM scrape_results WHERE scraped_by IS NOT NULL
+        # All time: resolved URL-jobs across all cycles (grouped by cycle + url_id)
+        all_time_row = await conn.fetchrow("""
+            WITH resolved AS (
+                SELECT
+                    cycle_started_at,
+                    url_id,
+                    bool_or(text_hash IS NOT NULL) AS has_success
+                FROM scrape_results
+                WHERE cycle_started_at IS NOT NULL
+                GROUP BY cycle_started_at, url_id
+            )
+            SELECT
+                COUNT(*)                                    AS total,
+                COUNT(*) FILTER (WHERE has_success)         AS good,
+                COUNT(*) FILTER (WHERE NOT has_success)     AS failed
+            FROM resolved
         """)
+        all_time = {
+            'total':  all_time_row['total'],
+            'good':   all_time_row['good'],
+            'failed': all_time_row['failed'],
+        }
 
         sentiment_total = await conn.fetchval("SELECT COUNT(*) FROM sentiment_runs")
 
@@ -265,7 +343,7 @@ async def get_status(pool: asyncpg.Pool) -> dict:
         """)
 
         by_worker_rows = await conn.fetch("""
-            SELECT scraped_by, COUNT(*) AS n
+            SELECT scraped_by, COUNT(DISTINCT url_id) AS n
             FROM scrape_results
             WHERE scraped_by IS NOT NULL
             GROUP BY scraped_by
@@ -285,8 +363,8 @@ async def get_status(pool: asyncpg.Pool) -> dict:
                 'active': url_counts['active'],
             },
             'urls_awaiting': urls_awaiting,
-            'scraped_today': scraped_today,
-            'scraped_all_time': scraped_all_time,
+            'this_run': this_run,
+            'all_time': all_time,
             'scrape_results': {'total': scrape_total},
             'sentiment_runs': {
                 'total':        sentiment_total,

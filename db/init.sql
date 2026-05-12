@@ -38,9 +38,10 @@ CREATE TABLE scrape_results (
     title       TEXT,
     text        TEXT,
     word_count  INTEGER,
-    text_hash   TEXT,     -- SHA-256[:16] of extracted text; NULL for error results (all errors stored, no dedup)
-    error       TEXT,
-    scraped_by  TEXT
+    text_hash        TEXT,     -- SHA-256[:16] of extracted text; NULL for error results (all errors stored, no dedup)
+    error            TEXT,
+    scraped_by       TEXT,
+    cycle_started_at TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX idx_scrape_results_url_text_hash
@@ -171,6 +172,12 @@ GROUP BY scrape_date, model, prompt_version
 ORDER BY scrape_date, model, prompt_version;
 
 CREATE UNIQUE INDEX ON mv_partisan_over_time (scrape_date, model, prompt_version);
+
+CREATE TABLE cycle_state (
+    id               INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    cycle_started_at TIMESTAMPTZ NOT NULL,
+    cycle_started_by TEXT NOT NULL DEFAULT 'scheduler'
+);
 
 -- Coordinator /work query
 CREATE INDEX idx_urls_active                ON urls(active) WHERE active = true;

@@ -57,6 +57,13 @@ async def lifespan(app: FastAPI):
     pool = await db.get_pool()
     app.state.pool = pool
     reload_keys()
+    try:
+        state = await db.get_cycle_state(pool)
+        app.state.cycle_started_at = state['cycle_started_at'] if state else None
+        log.info("Cycle state loaded: cycle_started_at=%s", app.state.cycle_started_at)
+    except Exception:
+        log.warning("cycle_state table not found or unreadable — cycle_started_at set to None")
+        app.state.cycle_started_at = None
     asyncio.create_task(reclaim_loop())
     yield
     await db.close_pool()
@@ -128,7 +135,11 @@ async def healthz():
 
 @app.get("/public/status")
 async def get_public_status():
-    status = await db.get_status(app.state.pool)
+    status = await db.get_status(
+        app.state.pool,
+        cycle_started_at=app.state.cycle_started_at,
+        max_scrape_attempts=MAX_SCRAPE_ATTEMPTS,
+    )
     by_worker = status["by_worker"]
 
     all_worker_ids = set(by_worker.keys()) | set(_worker_state.keys())
@@ -158,14 +169,16 @@ async def get_public_status():
 
         workers.append(entry)
 
+    cycle_started_at = app.state.cycle_started_at
     return {
         "jobs": status["jobs"],
         "urls_awaiting": status["urls_awaiting"],
-        "scraped_today": status["scraped_today"],
-        "scraped_all_time": status["scraped_all_time"],
+        "this_run": status["this_run"],
+        "all_time": status["all_time"],
         "scrape_results": status["scrape_results"],
         "sentiment_runs": status["sentiment_runs"],
         "last_scrape_at": status["last_scrape_at"],
+        "cycle_started_at": cycle_started_at.isoformat() if cycle_started_at else None,
         "next_run_at": next_run_utc(),
         "workers": workers,
     }
@@ -215,6 +228,7 @@ async def post_result(
             payload.error,
             payload.scraped_at,
             worker_name=worker_name,
+            cycle_started_at=app.state.cycle_started_at,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -260,7 +274,11 @@ async def post_sentiment_result(
 
 @app.get("/status")
 async def get_status(worker_name: str = Depends(require_api_key)):
-    status = await db.get_status(app.state.pool)
+    status = await db.get_status(
+        app.state.pool,
+        cycle_started_at=app.state.cycle_started_at,
+        max_scrape_attempts=MAX_SCRAPE_ATTEMPTS,
+    )
     log.info("worker=%s GET /status", worker_name)
     return status
 
@@ -275,9 +293,14 @@ async def admin_reload_keys(worker_name: str = Depends(require_api_key)):
 @app.post("/admin/start-cycle")
 async def admin_start_cycle(
     limit: int | None = None,
+    started_by: str = "manual",
     worker_name: str = Depends(require_api_key),
 ):
     effective_limit = limit if limit is not None else _cycle_url_limit
-    count = await db.start_cycle(app.state.pool, limit=effective_limit)
-    log.info("worker=%s POST /admin/start-cycle urls_activated=%d limit=%s", worker_name, count, effective_limit)
+    count, cycle_started_at = await db.start_cycle(
+        app.state.pool, limit=effective_limit, started_by=started_by
+    )
+    app.state.cycle_started_at = cycle_started_at
+    log.info("worker=%s POST /admin/start-cycle urls_activated=%d limit=%s started_by=%s",
+             worker_name, count, effective_limit, started_by)
     return {"ok": True, "urls_activated": count}

@@ -44,10 +44,15 @@ def run_sync_urls():
 
 def start_cycle():
     log("Starting new scrape cycle ...")
-    url = f"{COORDINATOR_URL}/admin/start-cycle"
+    params = {"started_by": "scheduler"}
     if CYCLE_URL_LIMIT:
-        url += f"?limit={CYCLE_URL_LIMIT}"
-    resp = requests.post(url, headers={"X-API-Key": ADMIN_KEY}, timeout=30)
+        params["limit"] = CYCLE_URL_LIMIT
+    resp = requests.post(
+        f"{COORDINATOR_URL}/admin/start-cycle",
+        params=params,
+        headers={"X-API-Key": ADMIN_KEY},
+        timeout=30,
+    )
     resp.raise_for_status()
     data = resp.json()
     log(f"Cycle started: {data['urls_activated']} URL(s) activated.")
