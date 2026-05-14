@@ -36,8 +36,7 @@ class WorkerAdapter(logging.LoggerAdapter):
 
 
 # ---------------------------------------------------------------------------
-# Core scraping — carried forward verbatim from v1
-# (scraper-cluster/worker.py: clean_text, extract_text, fetch)
+# Core scraping
 # ---------------------------------------------------------------------------
 
 def clean_text(text: str) -> str:
@@ -55,7 +54,13 @@ def extract_text(html: str):
     return title, clean_text(text)
 
 
-def fetch(url: str, wait_ms: int = 3000, goto_timeout: int = 30000, headless: bool = True):
+def fetch(url: str, wait_ms: int = 3000, goto_timeout: int = 30000, headless: bool = True) -> tuple[int, str, list[str]]:
+    """Returns (status, html, logs). logs is a list of strings for the parent to emit."""
+    logs: list[str] = []
+
+    def log(msg: str):
+        logs.append(msg)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
@@ -88,15 +93,27 @@ def fetch(url: str, wait_ms: int = 3000, goto_timeout: int = 30000, headless: bo
         stealth_sync(page)
 
         response = None
+
+        # Primary strategy: load — fires on the browser's real load event, equivalent
+        # content to networkidle, faster, and not subject to heuristic-based timeout
+        # failures caused by analytics/beacon scripts keeping the network perpetually busy.
+        t0 = time.time()
+        log(f"GOTO START url={url} strategy=load")
         try:
-            response = page.goto(url, wait_until="networkidle", timeout=goto_timeout)
+            response = page.goto(url, wait_until="load", timeout=goto_timeout)
+            log(f"GOTO OK url={url} strategy=load status={response.status if response else '?'} elapsed={time.time()-t0:.1f}s")
         except PlaywrightTimeoutError:
+            # load event timed out — page content is still available in the browser,
+            # don't re-navigate. response stays None; status will fall back to 200.
+            log(f"GOTO TIMEOUT url={url} strategy=load elapsed={time.time()-t0:.1f}s — continuing with page as-is")
+        except Exception as e:
+            log(f"GOTO ERROR url={url} strategy=load error={e} elapsed={time.time()-t0:.1f}s — trying domcontentloaded fallback")
+            t1 = time.time()
             try:
                 response = page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout)
-            except PlaywrightTimeoutError:
-                pass
-        except Exception:
-            pass
+                log(f"GOTO FALLBACK OK url={url} strategy=domcontentloaded status={response.status if response else '?'} elapsed={time.time()-t1:.1f}s")
+            except Exception as e2:
+                log(f"GOTO FALLBACK FAIL url={url} strategy=domcontentloaded error={e2} elapsed={time.time()-t1:.1f}s")
 
         random_wait = wait_ms + random.randint(-500, 1000)
         page.wait_for_timeout(max(1000, random_wait))
@@ -109,9 +126,11 @@ def fetch(url: str, wait_ms: int = 3000, goto_timeout: int = 30000, headless: bo
 
         html = page.content()
         status = response.status if response else 200
+        log(f"PAGE CONTENT url={url} chars={len(html)} response_set={response is not None}")
+
         context.close()
         browser.close()
-        return status, html
+        return status, html, logs
 
 
 # ---------------------------------------------------------------------------
@@ -128,29 +147,43 @@ def compute_hash(text: str) -> str:
 
 def _fetch_worker(url, wait_ms, goto_timeout, headless, result_queue):
     try:
-        status, html = fetch(url, wait_ms=wait_ms, goto_timeout=goto_timeout, headless=headless)
-        result_queue.put(("ok", status, html))
+        status, html, logs = fetch(url, wait_ms=wait_ms, goto_timeout=goto_timeout, headless=headless)
+        result_queue.put({"status": "ok", "status_code": status, "html": html, "logs": logs})
     except Exception as e:
-        result_queue.put(("error", str(e)))
+        result_queue.put({"status": "error", "error": str(e), "logs": []})
 
 
-def run_fetch_subprocess(url, wait_ms, goto_timeout, headless, fetch_timeout) -> tuple[int, str, str | None]:
-    """Returns (status_code, html, error). On crash/timeout: (0, '', error_str)."""
+def run_fetch_subprocess(url, wait_ms, goto_timeout, headless, fetch_timeout, job_id=None) -> tuple[int, str, str | None, list[str]]:
+    """Returns (status_code, html, error, logs). On crash/timeout: (0, '', error_str, logs)."""
     q = multiprocessing.Queue()
     p = multiprocessing.Process(target=_fetch_worker, args=(url, wait_ms, goto_timeout, headless, q))
     p.start()
+    pid = p.pid
+    parent_logs: list[str] = [f"SUBPROCESS START job_id={job_id} url={url} pid={pid}"]
+
+    t0 = time.time()
     p.join(timeout=fetch_timeout)
+    elapsed = round(time.time() - t0, 1)
+
     if p.is_alive():
         p.kill()
         p.join()
-        return 0, "", f"fetch timed out after {fetch_timeout}s"
+        parent_logs.append(f"SUBPROCESS TIMEOUT job_id={job_id} url={url} pid={pid} elapsed={elapsed}s fetch_timeout={fetch_timeout}s")
+        return 0, "", f"fetch timed out after {fetch_timeout}s", parent_logs
+
     if not q.empty():
         result = q.get()
-        if result[0] == "ok":
-            return result[1], result[2], None
+        subprocess_logs = result.get("logs", [])
+        all_logs = parent_logs + subprocess_logs
+        if result["status"] == "ok":
+            all_logs.append(f"SUBPROCESS OK job_id={job_id} url={url} pid={pid} elapsed={elapsed}s")
+            return result["status_code"], result["html"], None, all_logs
         else:
-            return 0, "", result[1]
-    return 0, "", "fetch subprocess exited with no result"
+            all_logs.append(f"SUBPROCESS ERROR job_id={job_id} url={url} pid={pid} elapsed={elapsed}s error={result['error']}")
+            return 0, "", result["error"], all_logs
+
+    parent_logs.append(f"SUBPROCESS NO RESULT job_id={job_id} url={url} pid={pid} — subprocess exited with no output")
+    return 0, "", "fetch subprocess exited with no result", parent_logs
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +264,8 @@ def main():
     error_backoff = Backoff(base=5, cap=60)
 
     log.info("Starting. coordinator=%s worker_id=%s", COORDINATOR_URL, worker_id)
+    log.info("config wait_ms=%d goto_timeout=%d fetch_timeout=%d headless=%s max_chars=%d",
+             wait_ms, goto_timeout, fetch_timeout, headless, max_chars)
 
     while True:
         # --- poll for work ---
@@ -263,14 +298,18 @@ def main():
         # --- fetch ---
         post_heartbeat(worker_id, url, "scraping")
         fetch_start = time.time()
-        status_code, html, fetch_error = run_fetch_subprocess(
+        status_code, html, fetch_error, subprocess_logs = run_fetch_subprocess(
             url,
             wait_ms=wait_ms,
             goto_timeout=goto_timeout,
             headless=headless,
             fetch_timeout=fetch_timeout,
+            job_id=job_id,
         )
         fetch_elapsed = round(time.time() - fetch_start, 1)
+
+        for line in subprocess_logs:
+            log.info("[subprocess] %s", line)
 
         if fetch_error:
             log.warning("FETCH ERROR job_id=%d url=%s error=%s elapsed=%.1fs", job_id, url, fetch_error, fetch_elapsed)
@@ -281,15 +320,18 @@ def main():
         # --- process text ---
         # For fetch errors, text="" was set above. For successful fetches, apply safety rail.
         # MAX_TEXT_CHARS is a safety rail, not a design target. Store the full page.
+        html_chars = len(html)
         text = (text or "")[:max_chars]
         word_count = len(text.split()) if text else 0
+        truncated = len(text or "") == max_chars
         # text_hash=None for errors — coordinator stores all error rows (no dedup on errors).
         # text_hash=sha256[:16] for successes — deduped via partial unique index.
         text_hash = compute_hash(text) if not fetch_error else None
 
         log.info(
-            "DONE job_id=%d url=%s status=%d words=%d chars=%d elapsed=%.1fs",
-            job_id, url, status_code, word_count, len(text), fetch_elapsed,
+            "DONE job_id=%d url=%s status=%d words=%d chars=%d html_chars=%d truncated=%s hash=%s elapsed=%.1fs",
+            job_id, url, status_code, word_count, len(text), html_chars,
+            truncated, text_hash or "none", fetch_elapsed,
         )
 
         # --- post result ---
